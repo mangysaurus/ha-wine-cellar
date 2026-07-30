@@ -16,6 +16,8 @@ interface WineCellarCardConfig {
   title?: string;
 }
 
+const FRONTEND_VERSION = "20260730e";
+
 @customElement("wine-cellar-card")
 export class WineCellarCard extends LitElement {
   @property({ attribute: false }) hass: any;
@@ -380,6 +382,7 @@ export class WineCellarCard extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    console.info(`Cork Dork frontend loaded: ${FRONTEND_VERSION} (restore transport: http)`);
     window.addEventListener("unhandledrejection", this._onUnhandledRejection);
     this._loadData();
   }

@@ -8333,6 +8333,7 @@ InventoryDialog = __decorate([
     t("inventory-dialog")
 ], InventoryDialog);
 
+const FRONTEND_VERSION = "20260730e";
 let WineCellarCard = class WineCellarCard extends i {
     constructor() {
         super(...arguments);
@@ -8395,6 +8396,7 @@ let WineCellarCard = class WineCellarCard extends i {
     }
     connectedCallback() {
         super.connectedCallback();
+        console.info(`Cork Dork frontend loaded: ${FRONTEND_VERSION} (restore transport: http)`);
         window.addEventListener("unhandledrejection", this._onUnhandledRejection);
         this._loadData();
     }

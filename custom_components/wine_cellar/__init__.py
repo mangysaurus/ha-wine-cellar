@@ -53,11 +53,11 @@ def _register_static_path(hass: HomeAssistant) -> None:
 
 
 def _register_frontend_resource(hass: HomeAssistant) -> None:
-    """Register the card JS as a Lovelace resource with cache-busted URL.
+    """Register the card JS as a Lovelace resource.
 
     Waits for HA to fully start so that lovelace_resources is available.
     """
-    url = f"/wine_cellar/wine-cellar-card-{FRONTEND_VERSION}.js"
+    url = f"/wine_cellar/wine-cellar-card.js?v={FRONTEND_VERSION}"
 
     # Use the lovelace resources collection if available
     try:
@@ -88,7 +88,6 @@ def _register_frontend_resource(hass: HomeAssistant) -> None:
                     break
 
             if existing:
-                # Update URL with new version
                 if existing.get("url") != url:
                     await resources.async_update_item(
                         existing["id"], {"url": url}
