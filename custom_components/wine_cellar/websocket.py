@@ -266,8 +266,8 @@ async def ws_update_wine(
         vol.Required("type"): "wine_cellar/move_wine",
         vol.Required("wine_id"): str,
         vol.Required("cabinet_id"): str,
-        vol.Optional("row"): int,
-        vol.Optional("col"): int,
+        vol.Optional("row"): vol.Any(int, None),
+        vol.Optional("col"): vol.Any(int, None),
         vol.Optional("zone", default=""): str,
         vol.Optional("depth", default=0): int,
     }

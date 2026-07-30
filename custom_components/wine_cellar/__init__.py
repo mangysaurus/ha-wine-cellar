@@ -281,8 +281,8 @@ async def _async_register_services(
         schema=vol.Schema({
             vol.Required("wine_id"): cv.string,
             vol.Required("cabinet_id"): cv.string,
-            vol.Optional("row"): vol.Coerce(int),
-            vol.Optional("col"): vol.Coerce(int),
+            vol.Optional("row"): vol.Any(vol.Coerce(int), None),
+            vol.Optional("col"): vol.Any(vol.Coerce(int), None),
         }),
     )
 

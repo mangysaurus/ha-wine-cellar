@@ -578,6 +578,32 @@ export class WineDetailDialog extends LitElement {
     }
   }
 
+  private async _moveToUnassigned() {
+    if (!this.wine || !this.hass) return;
+
+    try {
+      const updates = {
+        cabinet_id: "",
+        row: null,
+        col: null,
+        zone: "",
+        depth: 0,
+      };
+
+      await this.hass.callWS({
+        type: "wine_cellar/move_wine",
+        wine_id: this.wine.id,
+        cabinet_id: "",
+      });
+
+      this.wine = { ...this.wine, ...updates };
+      this.dispatchEvent(new CustomEvent("wine-updated", { bubbles: true, composed: true }));
+      this._close();
+    } catch (err) {
+      console.error("Failed to move wine to Unassigned", err);
+    }
+  }
+
   private _onCopy() {
     if (this.wine) {
       this.dispatchEvent(
@@ -1055,6 +1081,9 @@ export class WineDetailDialog extends LitElement {
                     : nothing}
                   <button class="btn btn-primary" style="background:#546e7a" @click=${this._onCopy}>📋 Copy</button>
                   <button class="btn btn-primary" style="background:#6d4c41" @click=${this._onMove}>↔ Move</button>
+                  ${wine.cabinet_id
+                    ? html`<button class="btn btn-primary" style="background:#ef6c00" @click=${this._moveToUnassigned}>📦 Unassign</button>`
+                    : nothing}
                   <button class="btn btn-primary" style="background:#c62828"
                     @click=${this._onRemove}>✕ Remove</button>
                 </div>

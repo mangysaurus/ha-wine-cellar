@@ -645,14 +645,17 @@ export class WineCellarCard extends LitElement {
   private async _executeMoveWine(cabinetId: string, row: number | null, col: number | null, zone: string, depth = 0) {
     if (!this._movingWine) return;
     try {
-      await this.hass.callWS({
+      const payload: Record<string, unknown> = {
         type: "wine_cellar/move_wine",
         wine_id: this._movingWine.id,
         cabinet_id: cabinetId,
-        row,
-        col,
         zone,
         depth,
+      };
+      if (row !== null) payload.row = row;
+      if (col !== null) payload.col = col;
+      await this.hass.callWS({
+        ...payload,
       });
       this._showToast(`Moved "${this._movingWine.name}"`);
       this._movingWine = null;
@@ -690,14 +693,15 @@ export class WineCellarCard extends LitElement {
       }
 
       // Move dragged wine to target
-      await this.hass.callWS({
+      const movePayload: Record<string, unknown> = {
         type: "wine_cellar/move_wine",
         wine_id: d.wineId,
         cabinet_id: d.targetCabinetId,
-        row: d.targetRow,
-        col: d.targetCol,
         zone: d.targetZone || "",
-      });
+      };
+      if (d.targetRow !== null) movePayload.row = d.targetRow;
+      if (d.targetCol !== null) movePayload.col = d.targetCol;
+      await this.hass.callWS(movePayload);
 
       this._showToast(targetWine ? "Swapped wines" : "Wine moved");
       await this._loadData();
