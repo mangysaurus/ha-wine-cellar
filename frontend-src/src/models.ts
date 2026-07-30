@@ -88,8 +88,12 @@ export interface BarcodeLookupResult {
   type: WineType;
   grape_variety: string;
   rating: number | null;
+  ratings_count?: number | null;
   image_url: string;
   price: number | null;
+  description?: string;
+  food_pairings?: string;
+  alcohol?: string;
   source: string;
 }
 

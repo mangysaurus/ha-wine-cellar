@@ -190,6 +190,50 @@ export class LabelCamera extends LitElement {
     }
   }
 
+  private _readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error("Failed to read image file"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  private _resizeDataUrl(
+    dataUrl: string,
+    maxDim = 1024,
+    quality = 0.8
+  ): Promise<{ dataUrl: string; base64: string }> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        let w = img.width;
+        let h = img.height;
+        if (w > maxDim || h > maxDim) {
+          const scale = maxDim / Math.max(w, h);
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Could not create canvas context"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        const resizedDataUrl = canvas.toDataURL("image/jpeg", quality);
+        resolve({
+          dataUrl: resizedDataUrl,
+          base64: resizedDataUrl.split(",")[1] || "",
+        });
+      };
+      img.onerror = () => reject(new Error("Failed to load image"));
+      img.src = dataUrl;
+    });
+  }
+
   private async _capture() {
     const video = this.renderRoot.querySelector("video") as HTMLVideoElement;
     if (!video) return;
@@ -224,48 +268,53 @@ export class LabelCamera extends LitElement {
     );
   }
 
-  private _onFileSelected(e: Event) {
+  private async _onFileSelected(e: Event) {
     const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
+    const files = Array.from(input.files ?? []);
+    if (!files.length) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
+    this._error = "";
 
-      // Resize if needed
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const maxDim = 1024;
-        let w = img.width;
-        let h = img.height;
-        if (w > maxDim || h > maxDim) {
-          const scale = maxDim / Math.max(w, h);
-          w = Math.round(w * scale);
-          h = Math.round(h * scale);
-        }
-        canvas.width = w;
-        canvas.height = h;
-        canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
-        const resizedDataUrl = canvas.toDataURL("image/jpeg", 0.8);
-        const resizedBase64 = resizedDataUrl.split(",")[1];
+    const photos = [];
+    for (const file of files) {
+      const dataUrl = await this._readFileAsDataUrl(file);
+      const resized = await this._resizeDataUrl(dataUrl);
+      photos.push({
+        name: file.name,
+        image: resized.base64,
+        preview: resized.dataUrl,
+      });
+    }
 
-        this._stopCamera();
-        this._captured = true;
-        this._capturedImage = resizedDataUrl;
+    input.value = "";
 
-        this.dispatchEvent(
-          new CustomEvent("photo-captured", {
-            detail: { image: resizedBase64 },
-            bubbles: true,
-            composed: true,
-          })
-        );
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
+    if (photos.length === 1) {
+      const photo = photos[0];
+      this._stopCamera();
+      this._captured = true;
+      this._capturedImage = photo.preview;
+
+      this.dispatchEvent(
+        new CustomEvent("photo-captured", {
+          detail: { image: photo.image },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return;
+    }
+
+    this._captured = false;
+    this._capturedImage = "";
+    this._stopCamera();
+
+    this.dispatchEvent(
+      new CustomEvent("photos-selected", {
+        detail: { photos },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   retake() {
@@ -299,7 +348,7 @@ export class LabelCamera extends LitElement {
       <div class="fallback-area">
         <label class="file-input-label">
           📁 Upload from gallery
-          <input type="file" accept="image/*" capture="environment" @change=${this._onFileSelected} />
+          <input type="file" accept="image/*" multiple @change=${this._onFileSelected} />
         </label>
       </div>
     `;

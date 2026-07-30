@@ -15,6 +15,22 @@ import "./star-rating";
 
 type Step = "scan" | "details" | "location" | "confirm";
 type ScanMode = "idle" | "barcode" | "label";
+type BatchItemStatus = "ready" | "adding" | "added" | "error" | "skipped";
+
+interface BatchPhoto {
+  name?: string;
+  image: string;
+  preview: string;
+}
+
+interface BatchReviewItem {
+  id: string;
+  name: string;
+  preview: string;
+  wineData: Partial<Wine>;
+  status: BatchItemStatus;
+  error: string;
+}
 
 @customElement("add-wine-dialog")
 export class AddWineDialog extends LitElement {
@@ -38,6 +54,8 @@ export class AddWineDialog extends LitElement {
   @state() private _hasGemini = false;
   @state() private _labelLoading = false;
   @state() private _searchResults: BarcodeLookupResult[] = [];
+  @state() private _batchItems: BatchReviewItem[] = [];
+  @state() private _batchLoading = false;
 
   static styles = [
     sharedStyles,
@@ -389,6 +407,127 @@ export class AddWineDialog extends LitElement {
         color: #f5a623;
         flex-shrink: 0;
       }
+
+      .batch-review {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .batch-review-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .batch-review-title {
+        font-weight: 600;
+        font-size: 1em;
+      }
+
+      .batch-review-subtitle {
+        font-size: 0.82em;
+        color: var(--wc-text-secondary);
+        margin-top: 2px;
+      }
+
+      .batch-review-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 420px;
+        overflow-y: auto;
+      }
+
+      .batch-item {
+        display: flex;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid var(--wc-border);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .batch-item-thumb {
+        width: 64px;
+        height: 86px;
+        border-radius: 8px;
+        object-fit: cover;
+        flex-shrink: 0;
+        background: rgba(128, 128, 128, 0.12);
+      }
+
+      .batch-item-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .batch-item-name {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        font-size: 0.95em;
+        margin-bottom: 2px;
+      }
+
+      .batch-item-badge {
+        font-size: 0.7em;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        padding: 3px 7px;
+        border-radius: 999px;
+        border: 1px solid var(--wc-border);
+        color: var(--wc-text-secondary);
+      }
+
+      .batch-item-badge.ready {
+        color: var(--wc-primary);
+        border-color: rgba(114, 47, 55, 0.35);
+      }
+
+      .batch-item-badge.adding {
+        color: #f5a623;
+        border-color: rgba(245, 166, 35, 0.35);
+      }
+
+      .batch-item-badge.added {
+        color: #2e7d32;
+        border-color: rgba(46, 125, 50, 0.35);
+      }
+
+      .batch-item-badge.error {
+        color: #c62828;
+        border-color: rgba(198, 40, 40, 0.35);
+      }
+
+      .batch-item-meta {
+        font-size: 0.8em;
+        color: var(--wc-text-secondary);
+        line-height: 1.35;
+      }
+
+      .batch-item-error {
+        margin-top: 6px;
+        color: #c62828;
+        font-size: 0.8em;
+      }
+
+      .batch-item-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+
+      .batch-empty {
+        padding: 18px 12px;
+        text-align: center;
+        color: var(--wc-text-secondary);
+        border: 1px dashed var(--wc-border);
+        border-radius: 12px;
+      }
     `,
   ];
 
@@ -429,6 +568,8 @@ export class AddWineDialog extends LitElement {
         this._error = "";
         this._loading = false;
         this._labelLoading = false;
+        this._batchItems = [];
+        this._batchLoading = false;
         this._searchResults = [];
         this._wineData = {
           name: "",
@@ -453,6 +594,8 @@ export class AddWineDialog extends LitElement {
       } else {
         // Ensure cameras stop when dialog closes
         this._scanMode = "idle";
+        this._batchItems = [];
+        this._batchLoading = false;
       }
     }
   }
@@ -470,6 +613,8 @@ export class AddWineDialog extends LitElement {
 
   private _close() {
     this._scanMode = "idle";
+    this._batchItems = [];
+    this._batchLoading = false;
     this.open = false;
     this.dispatchEvent(new CustomEvent("close"));
   }
@@ -573,6 +718,8 @@ export class AddWineDialog extends LitElement {
   }
 
   private async _onPhotoCaptured(e: CustomEvent) {
+    this._batchItems = [];
+    this._batchLoading = false;
     this._labelLoading = true;
     this._error = "";
 
@@ -619,6 +766,154 @@ export class AddWineDialog extends LitElement {
     }
 
     this._labelLoading = false;
+  }
+
+  private _onBatchPhotosSelected(e: CustomEvent<{ photos: BatchPhoto[] }>) {
+    void this._processBatchPhotos(e.detail.photos || []);
+  }
+
+  private _makeBatchId() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  private async _processBatchPhotos(photos: BatchPhoto[]) {
+    if (!photos.length) return;
+
+    this._batchItems = [];
+    this._batchLoading = true;
+    this._labelLoading = true;
+    this._error = "";
+    this._scanMode = "label";
+
+    const batchItems: BatchReviewItem[] = [];
+    for (const photo of photos) {
+      const itemId = this._makeBatchId();
+      try {
+        const result = await this.hass.callWS({
+          type: "wine_cellar/recognize_label",
+          image: photo.image,
+        });
+
+        if (result.result) {
+          const r = result.result;
+          batchItems.push({
+            id: itemId,
+            name: r.name || photo.name || "Unknown wine",
+            preview: photo.preview,
+            status: "ready",
+            error: "",
+            wineData: {
+              name: r.name || "",
+              winery: r.winery || "",
+              type: r.type || "red",
+              vintage: r.vintage,
+              region: r.region || "",
+              country: r.country || "",
+              grape_variety: r.grape_variety || "",
+              disposition: r.disposition || "",
+              drink_by: r.drink_by || "",
+              drink_window: r.drink_window || "",
+              description: r.description || "",
+              retail_price: r.estimated_price || null,
+              ai_ratings: r.ai_ratings || null,
+              notes: r.notes || "",
+              image_url: photo.preview,
+            },
+          });
+        } else {
+          batchItems.push({
+            id: itemId,
+            name: photo.name || "Unknown wine",
+            preview: photo.preview,
+            status: "error",
+            error: `Label recognition failed: ${result.error || "Unknown error"}`,
+            wineData: {},
+          });
+        }
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        batchItems.push({
+          id: itemId,
+          name: photo.name || "Unknown wine",
+          preview: photo.preview,
+          status: "error",
+          error: `Label recognition error: ${msg}`,
+          wineData: {},
+        });
+      }
+
+      this._batchItems = [...batchItems];
+    }
+
+    this._batchLoading = false;
+    this._labelLoading = false;
+  }
+
+  private async _addBatchItem(itemId: string) {
+    const item = this._batchItems.find((entry) => entry.id === itemId);
+    if (!item || item.status !== "ready") return;
+
+    this._batchItems = this._batchItems.map((entry) =>
+      entry.id === itemId ? { ...entry, status: "adding" } : entry
+    );
+
+    try {
+      if (this.buyListMode) {
+        await this.hass.callWS({
+          type: "wine_cellar/add_to_buy_list",
+          wine: item.wineData,
+        });
+        this.dispatchEvent(
+          new CustomEvent("buy-list-updated", { bubbles: true, composed: true })
+        );
+      } else {
+        await this.hass.callWS({
+          type: "wine_cellar/add_wine",
+          wine: item.wineData,
+        });
+        this.dispatchEvent(
+          new CustomEvent("wine-added", { bubbles: true, composed: true })
+        );
+      }
+
+      this._batchItems = this._batchItems.map((entry) =>
+        entry.id === itemId ? { ...entry, status: "added" } : entry
+      );
+    } catch (err) {
+      this._batchItems = this._batchItems.map((entry) =>
+        entry.id === itemId
+          ? {
+              ...entry,
+              status: "error",
+              error: this.buyListMode
+                ? "Failed to add to buy list."
+                : "Failed to add wine.",
+            }
+          : entry
+      );
+    }
+  }
+
+  private async _addAllBatchItems() {
+    const readyItems = this._batchItems.filter((item) => item.status === "ready");
+    if (!readyItems.length) return;
+
+    this._loading = true;
+    for (const item of readyItems) {
+      await this._addBatchItem(item.id);
+    }
+    this._loading = false;
+  }
+
+  private _removeBatchItem(itemId: string) {
+    this._batchItems = this._batchItems.filter((item) => item.id !== itemId);
+  }
+
+  private _clearBatchQueue() {
+    this._batchItems = [];
+    this._batchLoading = false;
+    this._labelLoading = false;
+    this._error = "";
   }
 
   private _goToStep(step: Step) {
@@ -689,7 +984,107 @@ export class AddWineDialog extends LitElement {
     `;
   }
 
+  private _renderBatchItem(item: BatchReviewItem) {
+    const metaParts = [
+      item.wineData.winery,
+      item.wineData.vintage ? `${item.wineData.vintage}` : "",
+      item.wineData.region || "",
+      item.wineData.country || "",
+    ].filter(Boolean);
+
+    return html`
+      <div class="batch-item">
+        <img class="batch-item-thumb" src="${item.preview}" alt=${item.name} />
+        <div class="batch-item-info">
+          <div class="batch-item-name">
+            <span>${item.name || "Unknown wine"}</span>
+            <span class="batch-item-badge ${item.status}">${item.status}</span>
+          </div>
+          ${metaParts.length
+            ? html`<div class="batch-item-meta">${metaParts.join(" · ")}</div>`
+            : nothing}
+          ${item.error ? html`<div class="batch-item-error">${item.error}</div>` : nothing}
+          <div class="batch-item-actions">
+            ${item.status === "ready"
+              ? html`
+                  <button class="btn btn-primary" @click=${() => this._addBatchItem(item.id)}>
+                    ${this._loading
+                      ? html`<span class="loading-spinner"></span>`
+                      : this.buyListMode
+                        ? "Add to Buy List"
+                        : "Add Wine"}
+                  </button>
+                  <button class="btn btn-outline" @click=${() => this._removeBatchItem(item.id)}>
+                    Skip
+                  </button>
+                `
+              : item.status === "added"
+                ? html`<button class="btn btn-outline" disabled>Added as Unassigned</button>`
+                : item.status === "adding"
+                  ? html`<button class="btn btn-outline" disabled>Adding...</button>`
+                  : html`<button class="btn btn-outline" @click=${() => this._removeBatchItem(item.id)}>Remove</button>`}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private _renderBatchQueue() {
+    const readyCount = this._batchItems.filter((item) => item.status === "ready").length;
+    const addedCount = this._batchItems.filter((item) => item.status === "added").length;
+    const pendingCount = this._batchItems.filter((item) => item.status === "adding").length;
+
+    return html`
+      <div class="scan-section">
+        <div class="batch-review">
+          <div class="batch-review-header">
+            <div>
+              <div class="batch-review-title">Review queued labels</div>
+              <div class="batch-review-subtitle">
+                ${this._batchLoading
+                  ? `Analyzing ${addedCount + pendingCount}/${this._batchItems.length}`
+                  : `${readyCount} ready, ${addedCount} added`}
+              </div>
+            </div>
+            ${this._batchLoading
+              ? html`<span class="loading-spinner"></span>`
+              : nothing}
+          </div>
+
+          ${this._batchItems.length
+            ? html`
+                <div class="batch-review-list">
+                  ${this._batchItems.map((item) => this._renderBatchItem(item))}
+                </div>
+              `
+            : html`<div class="batch-empty">No labels queued yet.</div>`}
+
+          ${this._error ? html`<div class="error-msg">${this._error}</div>` : nothing}
+        </div>
+      </div>
+
+      <div class="dialog-footer">
+        <button class="btn btn-outline" @click=${this._clearBatchQueue}>Clear Queue</button>
+        <button
+          class="btn btn-primary"
+          @click=${this._addAllBatchItems}
+          ?disabled=${readyCount === 0 || this._loading}
+        >
+          ${this._loading
+            ? html`<span class="loading-spinner"></span>`
+            : readyCount > 0
+              ? `Add ${readyCount} Ready`
+              : "Nothing to Add"}
+        </button>
+      </div>
+    `;
+  }
+
   private _renderScanStep() {
+    if (this._batchItems.length > 0 || this._batchLoading) {
+      return this._renderBatchQueue();
+    }
+
     // Barcode camera mode
     if (this._scanMode === "barcode") {
       return html`
@@ -728,6 +1123,7 @@ export class AddWineDialog extends LitElement {
                 <label-camera
                   .active=${true}
                   @photo-captured=${this._onPhotoCaptured}
+                  @photos-selected=${this._onBatchPhotosSelected}
                 ></label-camera>
               `}
           ${this._error ? html`<div class="error-msg">${this._error}</div>` : nothing}
