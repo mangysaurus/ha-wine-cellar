@@ -326,9 +326,22 @@ export class InventoryDialog extends LitElement {
         width: 100%;
         text-align: center;
         font-size: 0.78em;
-        padding: 4px 0 0;
+        padding: 6px 10px;
         color: #2e7d32;
         font-weight: 500;
+        border-radius: 10px;
+        box-sizing: border-box;
+      }
+
+      .inv-status.error {
+        background: rgba(198, 40, 40, 0.12);
+        color: #c62828;
+        border: 1px solid rgba(198, 40, 40, 0.28);
+      }
+
+      .inv-status.ok {
+        background: rgba(46, 125, 50, 0.08);
+        border: 1px solid rgba(46, 125, 50, 0.16);
       }
 
       /* Restore confirm overlay */
@@ -929,6 +942,7 @@ export class InventoryDialog extends LitElement {
 
     try {
       let result: any = null;
+      let httpErrorMessage = "";
       try {
         const resp = await fetch("/api/wine_cellar/restore_backup", {
           method: "POST",
@@ -941,14 +955,23 @@ export class InventoryDialog extends LitElement {
 
         const payload = await resp.json().catch(() => null);
         if (!resp.ok) {
-          throw new Error(payload?.error || payload?.message || `HTTP ${resp.status}`);
+          httpErrorMessage = payload?.error || payload?.message || `HTTP ${resp.status}`;
+          throw new Error(httpErrorMessage);
         }
         result = payload;
-      } catch (httpErr) {
-        result = await this.hass.callWS({
+      } catch (httpErr: any) {
+        const wsResult = await this.hass.callWS({
           type: "wine_cellar/restore_backup",
           backup: this._restoreData,
         });
+
+        if (wsResult?.error) {
+          throw new Error(
+            `HTTP restore endpoint failed: ${httpErrorMessage || httpErr?.message || httpErr}. WebSocket fallback failed: ${wsResult.error}`
+          );
+        }
+
+        result = wsResult;
       }
 
       if (result.error) {
@@ -1030,6 +1053,18 @@ export class InventoryDialog extends LitElement {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  private _getStatusTone() {
+    const msg = this._statusMsg.toLowerCase();
+    return msg.startsWith("restore failed") ||
+      msg.startsWith("backup failed") ||
+      msg.startsWith("server backup failed") ||
+      msg.startsWith("invalid json") ||
+      msg.startsWith("invalid backup file") ||
+      msg.startsWith("failed to list backups")
+      ? "error"
+      : "ok";
   }
 
   private _showWineDetail(wine: Wine) {
@@ -1239,7 +1274,7 @@ export class InventoryDialog extends LitElement {
                 : `${filteredWines.length} of ${this.wines.length} wines`}
             </span>
             ${this._statusMsg
-              ? html`<div class="inv-status">${this._statusMsg}</div>`
+              ? html`<div class="inv-status ${this._getStatusTone()}">${this._statusMsg}</div>`
               : nothing}
             <div class="inv-footer-btns">
               <button
