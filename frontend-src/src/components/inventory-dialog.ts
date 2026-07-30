@@ -941,20 +941,10 @@ export class InventoryDialog extends LitElement {
     this._statusMsg = "";
 
     try {
-      const response = await this.hass.fetchWithAuth("/api/wine_cellar/restore_backup", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(this._restoreData),
+      const result = await this.hass.callWS({
+        type: "wine_cellar/restore_backup",
+        backup: this._restoreData,
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Restore failed (${response.status}): ${errorText || response.statusText}`);
-      }
-
-      const result = await response.json();
 
       if (result.error) {
         this._statusMsg = `Restore failed: ${result.error}`;
