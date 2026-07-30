@@ -14,9 +14,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _LOGGER = logging.getLogger(__name__)
 
-GEMINI_API_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL_CANDIDATES = (
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
 )
 
 LABEL_PROMPT = """You are a master sommelier and wine label recognition expert. The current year is {current_year}. Analyze this wine label image, identify the wine, and provide a full assessment. Return ONLY a JSON object with these exact fields:
@@ -138,6 +141,66 @@ class GeminiVisionClient:
         self._hass = hass
         self._api_key = api_key
 
+    def _gemini_urls(self) -> list[str]:
+        """Return candidate Gemini model endpoints in priority order."""
+        return [
+            f"{GEMINI_API_BASE_URL}/models/{model}:generateContent"
+            for model in GEMINI_MODEL_CANDIDATES
+        ]
+
+    async def _post_gemini_request(
+        self, body: dict[str, Any], timeout: aiohttp.ClientTimeout
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """POST to Gemini, retrying across model candidates on 404."""
+        session = async_get_clientsession(self._hass)
+        last_error = None
+
+        for url in self._gemini_urls():
+            async with session.post(
+                url,
+                params={"key": self._api_key},
+                # Docs now recommend x-goog-api-key, but the query param is
+                # still accepted. Keeping it avoids any auth regressions.
+                json=body,
+                timeout=timeout,
+            ) as resp:
+                resp_text = await resp.text()
+
+                if resp.status == 200:
+                    try:
+                        return json.loads(resp_text), None
+                    except json.JSONDecodeError as err:
+                        return None, f"Failed to parse Gemini response: {err}"
+
+                if resp.status in (401, 403):
+                    return None, f"Gemini API key is invalid (HTTP {resp.status})"
+
+                if resp.status == 429:
+                    return None, (
+                        "Gemini API free tier quota exhausted. "
+                        "Enable billing at console.cloud.google.com or "
+                        "create a new API key at aistudio.google.com/apikey"
+                    )
+
+                if resp.status == 404:
+                    last_error = resp_text[:300]
+                    _LOGGER.warning(
+                        "Gemini model endpoint returned 404 for %s: %s",
+                        url,
+                        last_error,
+                    )
+                    continue
+
+                _LOGGER.error("Gemini API returned status %s: %s", resp.status, resp_text[:500])
+                return None, f"Gemini API error (HTTP {resp.status})"
+
+        if last_error:
+            return None, (
+                "Gemini model not found. Tried: "
+                + ", ".join(GEMINI_MODEL_CANDIDATES)
+            )
+        return None, "Gemini API error"
+
     async def recognize_label(self, image_base64: str) -> dict[str, Any]:
         """Send image to Gemini Vision and get structured wine data.
 
@@ -146,8 +209,6 @@ class GeminiVisionClient:
         """
         if not self._api_key:
             return {"error": "Gemini API key is empty"}
-
-        session = async_get_clientsession(self._hass)
 
         _LOGGER.debug(
             "Sending image to Gemini (%d chars base64)", len(image_base64)
@@ -169,132 +230,101 @@ class GeminiVisionClient:
             ],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "temperature": 0.1,
             },
         }
 
         try:
             timeout = aiohttp.ClientTimeout(total=45)
-            async with session.post(
-                GEMINI_API_URL,
-                params={"key": self._api_key},
-                json=body,
-                timeout=timeout,
-            ) as resp:
-                resp_text = await resp.text()
+            data, error = await self._post_gemini_request(body, timeout)
+            if error:
+                return {"error": error}
+            if data is None:
+                return {"error": "Gemini API error"}
 
-                if resp.status == 401 or resp.status == 403:
-                    _LOGGER.error(
-                        "Gemini API key is invalid (status %s): %s",
-                        resp.status,
-                        resp_text[:200],
-                    )
-                    return {"error": f"Gemini API key is invalid (HTTP {resp.status})"}
+            # Extract text from Gemini response
+            candidates = data.get("candidates", [])
+            if not candidates:
+                _LOGGER.warning(
+                    "Gemini returned no candidates: %s", str(data)[:500]
+                )
+                return {"error": "Gemini returned no results"}
 
-                if resp.status == 429:
-                    _LOGGER.error(
-                        "Gemini API quota exhausted: %s", resp_text[:300]
-                    )
-                    return {
-                        "error": "Gemini API free tier quota exhausted. "
-                        "Enable billing at console.cloud.google.com or "
-                        "create a new API key at aistudio.google.com/apikey"
-                    }
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if not parts:
+                _LOGGER.warning("Gemini response has no parts")
+                return {"error": "Gemini returned empty response"}
 
-                if resp.status != 200:
-                    _LOGGER.error(
-                        "Gemini API returned status %s: %s",
-                        resp.status,
-                        resp_text[:500],
-                    )
-                    return {"error": f"Gemini API error (HTTP {resp.status})"}
+            text = parts[0].get("text", "")
+            _LOGGER.debug("Gemini raw response: %s", text[:500])
+            result = json.loads(text)
 
-                data = json.loads(resp_text)
+            # Check for error response from Gemini
+            if "error" in result:
+                _LOGGER.debug("Gemini: %s", result["error"])
+                return {"error": f"Not a wine label: {result['error']}"}
 
-                # Extract text from Gemini response
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    _LOGGER.warning(
-                        "Gemini returned no candidates: %s", resp_text[:500]
-                    )
-                    return {"error": "Gemini returned no results"}
+            # Validate and normalize
+            valid_types = {"red", "white", "rosé", "sparkling", "dessert"}
+            wine_type = result.get("type", "red")
+            if wine_type not in valid_types:
+                wine_type = "red"
 
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-                if not parts:
-                    _LOGGER.warning("Gemini response has no parts")
-                    return {"error": "Gemini returned empty response"}
-
-                text = parts[0].get("text", "")
-                _LOGGER.debug("Gemini raw response: %s", text[:500])
-                result = json.loads(text)
-
-                # Check for error response from Gemini
-                if "error" in result:
-                    _LOGGER.debug("Gemini: %s", result["error"])
-                    return {"error": f"Not a wine label: {result['error']}"}
-
-                # Validate and normalize
-                valid_types = {"red", "white", "rosé", "sparkling", "dessert"}
-                wine_type = result.get("type", "red")
-                if wine_type not in valid_types:
-                    wine_type = "red"
-
-                vintage = result.get("vintage")
-                if vintage is not None:
-                    try:
-                        vintage = int(vintage)
-                        if vintage < 1900 or vintage > 2030:
-                            vintage = None
-                    except (ValueError, TypeError):
+            vintage = result.get("vintage")
+            if vintage is not None:
+                try:
+                    vintage = int(vintage)
+                    if vintage < 1900 or vintage > 2030:
                         vintage = None
+                except (ValueError, TypeError):
+                    vintage = None
 
-                name = str(result.get("name", "")).strip()
-                if not name:
-                    return {"error": "Could not read wine name from label"}
+            name = str(result.get("name", "")).strip()
+            if not name:
+                return {"error": "Could not read wine name from label"}
 
-                # Parse estimated price
-                est_price = result.get("estimated_price")
-                if est_price is not None:
-                    try:
-                        est_price = round(float(est_price), 2)
-                        if est_price <= 0:
-                            est_price = None
-                    except (ValueError, TypeError):
+            # Parse estimated price
+            est_price = result.get("estimated_price")
+            if est_price is not None:
+                try:
+                    est_price = round(float(est_price), 2)
+                    if est_price <= 0:
                         est_price = None
+                except (ValueError, TypeError):
+                    est_price = None
 
-                # Parse disposition
-                disp = result.get("disposition", "")
-                if disp not in ("D", "H", "P"):
-                    disp = ""
+            # Parse disposition
+            disp = result.get("disposition", "")
+            if disp not in ("D", "H", "P"):
+                disp = ""
 
-                # Parse AI ratings
-                ai_ratings: dict[str, int] = {}
-                for key in ("rating_ws", "rating_rp", "rating_jd", "rating_ag"):
-                    val = result.get(key)
-                    if val and isinstance(val, (int, float)) and 50 <= val <= 100:
-                        ai_ratings[key] = int(val)
+            # Parse AI ratings
+            ai_ratings: dict[str, int] = {}
+            for key in ("rating_ws", "rating_rp", "rating_jd", "rating_ag"):
+                val = result.get(key)
+                if val and isinstance(val, (int, float)) and 50 <= val <= 100:
+                    ai_ratings[key] = int(val)
 
-                return {
-                    "name": name,
-                    "winery": str(result.get("winery", "")).strip(),
-                    "region": str(result.get("region", "")).strip(),
-                    "country": str(result.get("country", "")).strip(),
-                    "vintage": vintage,
-                    "type": wine_type,
-                    "grape_variety": str(result.get("grape_variety", "")).strip(),
-                    "disposition": disp,
-                    "drink_by": str(result.get("drink_by", "")).strip(),
-                    "drink_window": str(result.get("drink_window", "")).strip(),
-                    "description": str(result.get("description", "")).strip(),
-                    "estimated_price": est_price,
-                    "ai_ratings": ai_ratings if ai_ratings else None,
-                    "notes": str(result.get("notes", "")).strip(),
-                    "rating": None,
-                    "image_url": "",
-                    "price": None,
-                    "source": "gemini",
-                }
+            return {
+                "name": name,
+                "winery": str(result.get("winery", "")).strip(),
+                "region": str(result.get("region", "")).strip(),
+                "country": str(result.get("country", "")).strip(),
+                "vintage": vintage,
+                "type": wine_type,
+                "grape_variety": str(result.get("grape_variety", "")).strip(),
+                "disposition": disp,
+                "drink_by": str(result.get("drink_by", "")).strip(),
+                "drink_window": str(result.get("drink_window", "")).strip(),
+                "description": str(result.get("description", "")).strip(),
+                "estimated_price": est_price,
+                "ai_ratings": ai_ratings if ai_ratings else None,
+                "notes": str(result.get("notes", "")).strip(),
+                "rating": None,
+                "image_url": "",
+                "price": None,
+                "source": "gemini",
+            }
 
         except json.JSONDecodeError as err:
             _LOGGER.error("Failed to parse Gemini response: %s", err)
@@ -318,7 +348,6 @@ class GeminiVisionClient:
         if not self._api_key:
             return {"error": "Gemini API key is empty"}
 
-        session = async_get_clientsession(self._hass)
         _LOGGER.debug(
             "Extracting wine list from image (%d chars base64)", len(image_base64)
         )
@@ -345,148 +374,139 @@ class GeminiVisionClient:
             ],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "temperature": 0.1,
             },
         }
 
         try:
             timeout = aiohttp.ClientTimeout(total=180)
-            async with session.post(
-                GEMINI_API_URL,
-                params={"key": self._api_key},
-                json=body,
-                timeout=timeout,
-            ) as resp:
-                if resp.status in (401, 403):
-                    return {"error": f"Gemini API key is invalid (HTTP {resp.status})"}
-                if resp.status == 429:
-                    return {"error": "Gemini API quota exhausted"}
-                if resp.status != 200:
-                    return {"error": f"Gemini API error (HTTP {resp.status})"}
+            data, error = await self._post_gemini_request(body, timeout)
+            if error:
+                return {"error": error}
+            if data is None:
+                return {"error": "Gemini API error"}
 
-                data = json.loads(await resp.text())
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return {"error": "Gemini returned no results"}
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return {"error": "Gemini returned no results"}
 
-                text = (
-                    candidates[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "")
-                )
-                result = json.loads(text)
+            text = (
+                candidates[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
+            result = json.loads(text)
 
-                if "error" in result:
-                    return {"error": f"Not a wine list: {result['error']}"}
+            if "error" in result:
+                return {"error": f"Not a wine list: {result['error']}"}
 
-                raw_wines = result.get("wines", [])
-                if not raw_wines:
-                    return {"error": "No wines found in the image"}
+            raw_wines = result.get("wines", [])
+            if not raw_wines:
+                return {"error": "No wines found in the image"}
 
-                valid_types = {"red", "white", "rosé", "sparkling", "dessert"}
-                validated = []
+            valid_types = {"red", "white", "rosé", "sparkling", "dessert"}
+            validated = []
 
-                for i, w in enumerate(raw_wines):
-                    name = str(w.get("name", "")).strip()
-                    if not name:
-                        continue
+            for i, w in enumerate(raw_wines):
+                name = str(w.get("name", "")).strip()
+                if not name:
+                    continue
 
-                    wine_type = w.get("type", "red")
-                    if wine_type not in valid_types:
-                        wine_type = "red"
+                wine_type = w.get("type", "red")
+                if wine_type not in valid_types:
+                    wine_type = "red"
 
-                    vintage = w.get("vintage")
-                    if vintage is not None:
-                        try:
-                            vintage = int(vintage)
-                            if vintage < 1900 or vintage > 2030:
-                                vintage = None
-                        except (ValueError, TypeError):
+                vintage = w.get("vintage")
+                if vintage is not None:
+                    try:
+                        vintage = int(vintage)
+                        if vintage < 1900 or vintage > 2030:
                             vintage = None
+                    except (ValueError, TypeError):
+                        vintage = None
 
-                    list_price = w.get("list_price")
-                    if list_price is not None:
-                        try:
-                            list_price = round(float(list_price), 2)
-                            if list_price <= 0:
-                                list_price = None
-                        except (ValueError, TypeError):
+                list_price = w.get("list_price")
+                if list_price is not None:
+                    try:
+                        list_price = round(float(list_price), 2)
+                        if list_price <= 0:
                             list_price = None
+                    except (ValueError, TypeError):
+                        list_price = None
 
-                    estimated_retail = w.get("estimated_retail_price")
-                    if estimated_retail is not None:
-                        try:
-                            estimated_retail = round(float(estimated_retail), 2)
-                            if estimated_retail <= 0:
-                                estimated_retail = None
-                        except (ValueError, TypeError):
+                estimated_retail = w.get("estimated_retail_price")
+                if estimated_retail is not None:
+                    try:
+                        estimated_retail = round(float(estimated_retail), 2)
+                        if estimated_retail <= 0:
                             estimated_retail = None
+                    except (ValueError, TypeError):
+                        estimated_retail = None
 
-                    glass_price = w.get("glass_price")
-                    if glass_price is not None:
-                        try:
-                            glass_price = round(float(glass_price), 2)
-                            if glass_price <= 0:
-                                glass_price = None
-                        except (ValueError, TypeError):
+                glass_price = w.get("glass_price")
+                if glass_price is not None:
+                    try:
+                        glass_price = round(float(glass_price), 2)
+                        if glass_price <= 0:
                             glass_price = None
+                    except (ValueError, TypeError):
+                        glass_price = None
 
-                    # AI analysis fields
-                    disposition = str(w.get("disposition", "")).strip().upper()
-                    if disposition not in ("D", "H", "P"):
-                        disposition = ""
-                    drink_window = str(w.get("drink_window", "")).strip()
-                    description = str(w.get("description", "")).strip()
+                # AI analysis fields
+                disposition = str(w.get("disposition", "")).strip().upper()
+                if disposition not in ("D", "H", "P"):
+                    disposition = ""
+                drink_window = str(w.get("drink_window", "")).strip()
+                description = str(w.get("description", "")).strip()
 
-                    # Validate critic ratings (50-100 range)
-                    ai_ratings: dict[str, int] = {}
-                    for rkey in ("rating_ws", "rating_rp", "rating_jd", "rating_ag"):
-                        rval = w.get(rkey)
-                        if rval is not None:
-                            try:
-                                rval = int(rval)
-                                if 50 <= rval <= 100:
-                                    ai_ratings[rkey] = rval
-                            except (ValueError, TypeError):
-                                pass
+                # Validate critic ratings (50-100 range)
+                ai_ratings: dict[str, int] = {}
+                for rkey in ("rating_ws", "rating_rp", "rating_jd", "rating_ag"):
+                    rval = w.get(rkey)
+                    if rval is not None:
+                        try:
+                            rval = int(rval)
+                            if 50 <= rval <= 100:
+                                ai_ratings[rkey] = rval
+                        except (ValueError, TypeError):
+                            pass
 
-                    validated.append({
-                        "index": i,
-                        "name": name,
-                        "winery": str(w.get("winery", "")).strip(),
-                        "vintage": vintage,
-                        "type": wine_type,
-                        "region": str(w.get("region", "")).strip(),
-                        "country": str(w.get("country", "")).strip(),
-                        "grape_variety": str(w.get("grape_variety", "")).strip(),
-                        "list_price": list_price,
-                        "list_price_currency": str(
-                            w.get("list_price_currency", "USD")
-                        ).strip().upper(),
-                        "estimated_retail_price": estimated_retail,
-                        "glass_price": glass_price,
-                        "bottle_size": str(w.get("bottle_size", "750ml")).strip(),
-                        "disposition": disposition,
-                        "drink_window": drink_window,
-                        "description": description,
-                        "ai_ratings": ai_ratings if ai_ratings else None,
-                    })
-
-                raw_name = str(
-                    result.get("restaurant_name", "")
-                ).strip()
-                # Gemini sometimes returns literal "None" or "null"
-                if raw_name.lower() in ("none", "null", "n/a", ""):
-                    raw_name = None  # type: ignore[assignment]
-
-                return {
-                    "wines": validated,
-                    "restaurant_name": raw_name or None,
-                    "currency": str(
-                        result.get("currency", "USD")
+                validated.append({
+                    "index": i,
+                    "name": name,
+                    "winery": str(w.get("winery", "")).strip(),
+                    "vintage": vintage,
+                    "type": wine_type,
+                    "region": str(w.get("region", "")).strip(),
+                    "country": str(w.get("country", "")).strip(),
+                    "grape_variety": str(w.get("grape_variety", "")).strip(),
+                    "list_price": list_price,
+                    "list_price_currency": str(
+                        w.get("list_price_currency", "USD")
                     ).strip().upper(),
-                }
+                    "estimated_retail_price": estimated_retail,
+                    "glass_price": glass_price,
+                    "bottle_size": str(w.get("bottle_size", "750ml")).strip(),
+                    "disposition": disposition,
+                    "drink_window": drink_window,
+                    "description": description,
+                    "ai_ratings": ai_ratings if ai_ratings else None,
+                })
+
+            raw_name = str(
+                result.get("restaurant_name", "")
+            ).strip()
+            # Gemini sometimes returns literal "None" or "null"
+            if raw_name.lower() in ("none", "null", "n/a", ""):
+                raw_name = None  # type: ignore[assignment]
+
+            return {
+                "wines": validated,
+                "restaurant_name": raw_name or None,
+                "currency": str(
+                    result.get("currency", "USD")
+                ).strip().upper(),
+            }
 
         except json.JSONDecodeError as err:
             _LOGGER.error("Failed to parse wine list response: %s", err)
@@ -568,63 +588,54 @@ Rules:
   - "rating_ag": Antonio Galloni / Vinous score (out of 100)
 - "estimated_price": estimated current retail price in USD as a number (e.g. 45.00). Use your knowledge of the wine market to estimate what this bottle currently sells for. Return null only if you truly cannot estimate."""
 
-        session = async_get_clientsession(self._hass)
-
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "temperature": 0.2,
             },
         }
 
         try:
             timeout = aiohttp.ClientTimeout(total=45)
-            async with session.post(
-                GEMINI_API_URL,
-                params={"key": self._api_key},
-                json=body,
-                timeout=timeout,
-            ) as resp:
-                if resp.status == 429:
-                    return {"error": "Gemini API quota exhausted"}
-                if resp.status != 200:
-                    return {"error": f"Gemini API error (HTTP {resp.status})"}
+            data, error = await self._post_gemini_request(body, timeout)
+            if error:
+                return {"error": error}
+            if data is None:
+                return {"error": "Gemini API error"}
 
-                data = json.loads(await resp.text())
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return {"error": "Gemini returned no results"}
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return {"error": "Gemini returned no results"}
 
-                text = candidates[0]["content"]["parts"][0]["text"]
-                result = json.loads(text)
+            text = candidates[0]["content"]["parts"][0]["text"]
+            result = json.loads(text)
 
-                # Validate disposition
-                disp = result.get("disposition", "D")
-                if disp not in ("D", "H", "P"):
-                    disp = "D"
+            # Validate disposition
+            disp = result.get("disposition", "D")
+            if disp not in ("D", "H", "P"):
+                disp = "D"
 
-                # Parse estimated price
-                est_price = result.get("estimated_price")
-                if est_price is not None:
-                    try:
-                        est_price = round(float(est_price), 2)
-                        if est_price <= 0:
-                            est_price = None
-                    except (ValueError, TypeError):
+            # Parse estimated price
+            est_price = result.get("estimated_price")
+            if est_price is not None:
+                try:
+                    est_price = round(float(est_price), 2)
+                    if est_price <= 0:
                         est_price = None
+                except (ValueError, TypeError):
+                    est_price = None
 
-                return {
-                    "disposition": disp,
-                    "drink_by": str(result.get("drink_by", "")).strip(),
-                    "drink_window": str(result.get("drink_window", "")).strip(),
-                    "description": str(result.get("description", "")).strip(),
-                    "estimated_price": est_price,
-                    "rating_ws": result.get("rating_ws"),
-                    "rating_rp": result.get("rating_rp"),
-                    "rating_jd": result.get("rating_jd"),
-                    "rating_ag": result.get("rating_ag"),
-                }
+            return {
+                "disposition": disp,
+                "drink_by": str(result.get("drink_by", "")).strip(),
+                "drink_window": str(result.get("drink_window", "")).strip(),
+                "description": str(result.get("description", "")).strip(),
+                "estimated_price": est_price,
+                "rating_ws": result.get("rating_ws"),
+                "rating_rp": result.get("rating_rp"),
+                "rating_jd": result.get("rating_jd"),
+                "rating_ag": result.get("rating_ag"),
+            }
 
         except Exception as err:
             _LOGGER.error("Single wine analysis error: %s", err)
@@ -677,47 +688,38 @@ Return ONLY a JSON object mapping wine IDs to dispositions:
 Wines:
 {chr(10).join(wine_lines)}"""
 
-        session = async_get_clientsession(self._hass)
-
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "temperature": 0.1,
             },
         }
 
         try:
             timeout = aiohttp.ClientTimeout(total=180)
-            async with session.post(
-                GEMINI_API_URL,
-                params={"key": self._api_key},
-                json=body,
-                timeout=timeout,
-            ) as resp:
-                if resp.status == 429:
-                    return {"error": "Gemini API quota exhausted"}
-                if resp.status != 200:
-                    return {"error": f"Gemini API error (HTTP {resp.status})"}
+            data, error = await self._post_gemini_request(body, timeout)
+            if error:
+                return {"error": error}
+            if data is None:
+                return {"error": "Gemini API error"}
 
-                data = json.loads(await resp.text())
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return {"error": "Gemini returned no results"}
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return {"error": "Gemini returned no results"}
 
-                text = candidates[0]["content"]["parts"][0]["text"]
-                dispositions = json.loads(text)
+            text = candidates[0]["content"]["parts"][0]["text"]
+            dispositions = json.loads(text)
 
-                # Validate dispositions
-                valid = {"D", "H", "P"}
-                cleaned = {}
-                for wine_id, disp in dispositions.items():
-                    if disp in valid:
-                        cleaned[wine_id] = disp
-                    else:
-                        cleaned[wine_id] = "D"
+            # Validate dispositions
+            valid = {"D", "H", "P"}
+            cleaned = {}
+            for wine_id, disp in dispositions.items():
+                if disp in valid:
+                    cleaned[wine_id] = disp
+                else:
+                    cleaned[wine_id] = "D"
 
-                return {"dispositions": cleaned}
+            return {"dispositions": cleaned}
 
         except Exception as err:
             _LOGGER.error("Wine analysis error: %s", err)
