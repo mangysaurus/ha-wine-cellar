@@ -19,6 +19,13 @@ interface WineCellarCardConfig {
 @customElement("wine-cellar-card")
 export class WineCellarCard extends LitElement {
   @property({ attribute: false }) hass: any;
+  private _onUnhandledRejection = (event: PromiseRejectionEvent) => {
+    const reason = event.reason;
+    if (reason?.code === "not_found" && reason?.message === "Subscription not found.") {
+      event.preventDefault();
+      console.debug("Cork Dork: suppressed stale websocket subscription cleanup error");
+    }
+  };
 
   @state() private _config?: WineCellarCardConfig;
   @state() private _wines: Wine[] = [];
@@ -373,7 +380,13 @@ export class WineCellarCard extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    window.addEventListener("unhandledrejection", this._onUnhandledRejection);
     this._loadData();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("unhandledrejection", this._onUnhandledRejection);
+    super.disconnectedCallback();
   }
 
   updated(changedProps: Map<string, unknown>) {
