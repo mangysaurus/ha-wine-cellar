@@ -263,18 +263,35 @@ class WineCellarStorage:
         total_capacity = 0
         for c in self.cabinets:
             if c.get("type") == "grid":
-                storage_row_count = len(c.get("storage_rows", []))
-                grid_rows = c.get("rows", 0) - storage_row_count
-                total_capacity += max(0, grid_rows) * c.get("cols", 0) * c.get("depth", 1)
+                storage_rows = c.get("storage_rows", [])
+                storage_row_count = len(storage_rows)
+                grid_rows = max(0, c.get("rows", 0) - storage_row_count)
+                grid_capacity = grid_rows * c.get("cols", 0) * c.get("depth", 1)
+
+                zone_capacity = 0
+                for storage_row in storage_rows:
+                    row_type = storage_row.get("type", "bulk")
+                    if row_type == "box":
+                        boxes = storage_row.get("boxes", [])
+                        zone_capacity += sum(
+                            box for box in boxes if isinstance(box, (int, float))
+                        )
+                    else:
+                        zone_capacity += storage_row.get("capacity", 0)
+
+                total_capacity += grid_capacity + zone_capacity
         by_type: dict[str, int] = {}
         by_cabinet: dict[str, int] = {}
         total_value = 0.0
         total_cost = 0.0
+        assigned_bottles = 0
         for wine in self.wines:
             wine_type = wine.get("type", "unknown")
             by_type[wine_type] = by_type.get(wine_type, 0) + 1
             cab_id = wine.get("cabinet_id", "unassigned")
             by_cabinet[cab_id] = by_cabinet.get(cab_id, 0) + 1
+            if wine.get("cabinet_id"):
+                assigned_bottles += 1
             # Use retail price (current value) if available, else purchase price
             price = wine.get("retail_price") or wine.get("price")
             if price and isinstance(price, (int, float)):
@@ -287,7 +304,7 @@ class WineCellarStorage:
         return {
             "total_bottles": total_bottles,
             "total_capacity": total_capacity,
-            "available_slots": total_capacity - total_bottles,
+            "available_slots": max(0, total_capacity - assigned_bottles),
             "total_value": round(total_value, 2),
             "total_cost": round(total_cost, 2),
             "by_type": by_type,
