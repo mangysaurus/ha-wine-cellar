@@ -7317,34 +7317,18 @@ let InventoryDialog = class InventoryDialog extends i {
         this._restoring = true;
         this._statusMsg = "";
         try {
-            let result = null;
-            let httpErrorMessage = "";
-            try {
-                const resp = await fetch("/api/wine_cellar/restore_backup", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                    credentials: "same-origin",
-                    body: JSON.stringify(this._restoreData),
-                });
-                const payload = await resp.json().catch(() => null);
-                if (!resp.ok) {
-                    httpErrorMessage = payload?.error || payload?.message || `HTTP ${resp.status}`;
-                    throw new Error(httpErrorMessage);
-                }
-                result = payload;
+            const response = await this.hass.fetchWithAuth("/api/wine_cellar/restore_backup", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(this._restoreData),
+            });
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Restore failed (${response.status}): ${errorText || response.statusText}`);
             }
-            catch (httpErr) {
-                const wsResult = await this.hass.callWS({
-                    type: "wine_cellar/restore_backup",
-                    backup: this._restoreData,
-                });
-                if (wsResult?.error) {
-                    throw new Error(`HTTP restore endpoint failed: ${httpErrorMessage || httpErr?.message || httpErr}. WebSocket fallback failed: ${wsResult.error}`);
-                }
-                result = wsResult;
-            }
+            const result = await response.json();
             if (result.error) {
                 this._statusMsg = `Restore failed: ${result.error}`;
             }
