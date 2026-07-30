@@ -11,9 +11,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from aiohttp import web
 from homeassistant.components import websocket_api
-from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
@@ -192,46 +190,6 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_server_backup_save)
     websocket_api.async_register_command(hass, ws_server_backup_list)
     websocket_api.async_register_command(hass, ws_server_backup_restore)
-
-
-def async_register_http_views(hass: HomeAssistant) -> None:
-    """Register HTTP views used by the frontend."""
-    hass.http.register_view(WineCellarBackupRestoreView())
-
-
-class WineCellarBackupRestoreView(HomeAssistantView):
-    """Authenticated HTTP restore endpoint for large backup uploads."""
-
-    url = "/api/wine_cellar/restore_backup"
-    name = "api:wine_cellar:restore_backup"
-    requires_auth = True
-
-    async def post(self, request: web.Request) -> web.Response:
-        """Restore cellar data from raw JSON text."""
-        hass: HomeAssistant = request.app["hass"]
-
-        try:
-            raw_text = await request.text()
-            if not raw_text.strip():
-                return self.json({"error": "Empty request body."}, status_code=400)
-
-            data = json.loads(raw_text)
-        except json.JSONDecodeError as err:
-            _LOGGER.warning("Restore upload rejected: invalid JSON payload: %s", err)
-            return self.json({"error": "Invalid JSON payload."}, status_code=400)
-        except Exception as err:
-            _LOGGER.error("Restore upload failed while reading request body: %s", err)
-            return self.json({"error": str(err)}, status_code=400)
-
-        result = await _restore_backup_data(hass, data)
-        if isinstance(result, str):
-            return self.json({"error": result}, status_code=400)
-
-        _LOGGER.info(
-            "Backup restored via HTTP: %d wines, %d cabinets, %d buy list items",
-            result["wines"], result["cabinets"], result["buy_list"],
-        )
-        return self.json({"success": True, **result})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "wine_cellar/get_wines"})
@@ -1336,13 +1294,17 @@ async def ws_server_backup_list(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """List available server backups."""
+    """List available server-side JSON backup files."""
     backup_dir = _get_server_backup_dir(hass)
 
     def _list_backups() -> list[dict]:
-        files = sorted(backup_dir.glob("wine_cellar_*.json"), reverse=True)
+        files = sorted(
+            [path for path in backup_dir.glob("*.json") if path.is_file()],
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
         result = []
-        for f in files[:20]:  # limit to 20 most recent
+        for f in files[:50]:  # limit to 50 most recent
             try:
                 data = json.loads(f.read_text("utf-8"))
                 result.append({
@@ -1351,10 +1313,17 @@ async def ws_server_backup_list(
                     "wines": len(data.get("wines", [])),
                     "cabinets": len(data.get("cabinets", [])),
                     "buy_list": len(data.get("buy_list", [])),
+                    "wine_history": len(data.get("wine_history", [])),
                     "size": f.stat().st_size,
+                    "source": "server_file",
                 })
             except Exception:
-                result.append({"filename": f.name, "error": "unreadable"})
+                result.append({
+                    "filename": f.name,
+                    "error": "unreadable",
+                    "size": f.stat().st_size,
+                    "source": "server_file",
+                })
         return result
 
     try:

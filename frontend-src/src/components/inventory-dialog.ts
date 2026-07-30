@@ -23,10 +23,6 @@ export class InventoryDialog extends LitElement {
   @state() private _showDetail = false;
   @state() private _backingUp = false;
   @state() private _importing = false;
-  @state() private _restoring = false;
-  @state() private _confirmRestore = false;
-  @state() private _restoreData: any = null;
-  @state() private _restoreText = "";
   @state() private _statusMsg = "";
   @state() private _serverBackingUp = false;
   @state() private _serverBackupLabel = "";
@@ -514,9 +510,7 @@ export class InventoryDialog extends LitElement {
       this._showDetail = false;
       this._detailWine = null;
       this._statusMsg = "";
-      this._confirmRestore = false;
       this._showServerRestore = false;
-      this._restoreData = null;
       this._viewMode = "inventory";
       this._historyItems = [];
     }
@@ -919,91 +913,6 @@ export class InventoryDialog extends LitElement {
     return result;
   }
 
-  // ── Restore JSON ──────────────────────────────────────────────
-
-  private _triggerRestore() {
-    const input = this.shadowRoot?.querySelector("#inv-json-input") as HTMLInputElement;
-    if (input) {
-      input.value = "";
-      input.click();
-    }
-  }
-
-  private async _handleRestoreFile(e: Event) {
-    const file = (e.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-
-    try {
-      const text = await file.text();
-      const data = JSON.parse(text);
-
-      if (!data.wines || !Array.isArray(data.wines)) {
-        this._statusMsg = "Invalid backup file: missing wines array.";
-        return;
-      }
-      if (!data.cabinets || !Array.isArray(data.cabinets)) {
-        this._statusMsg = "Invalid backup file: missing cabinets array.";
-        return;
-      }
-
-      this._restoreData = data;
-      this._restoreText = text;
-      this._confirmRestore = true;
-    } catch (err: any) {
-      this._statusMsg = `Invalid JSON file: ${this._logStatus("invalid restore JSON", err)}`;
-    }
-  }
-
-  private async _executeRestore() {
-    if (!this._restoreData) return;
-
-    this._confirmRestore = false;
-    this._restoring = true;
-    this._statusMsg = "";
-
-    try {
-      const response = await this.hass.fetchWithAuth(
-        "/api/wine_cellar/restore_backup",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: this._restoreText,
-        }
-      );
-
-      const responseText = await response.text();
-      let result: any = {};
-      if (responseText) {
-        try {
-          result = JSON.parse(responseText);
-        } catch {
-          result = { error: responseText };
-        }
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          `Restore failed (${response.status}): ${result?.error || responseText || response.statusText}`
-        );
-      }
-
-      if (result.error) {
-        this._statusMsg = `Restore failed: ${result.error}`;
-      } else {
-        this._statusMsg = `Restored ${result.wines} wines, ${result.cabinets} racks, ${result.buy_list} buy list items!`;
-        this.dispatchEvent(new CustomEvent("wine-updated", { bubbles: true, composed: true }));
-      }
-    } catch (err: any) {
-      this._statusMsg = `Restore failed: ${this._logStatus("restore failed", err)}`;
-    }
-
-    this._restoring = false;
-    this._restoreData = null;
-    this._restoreText = "";
-  }
-
   // ── Cloud Sync (Google Drive / file system) ──────────────────
 
   private async _serverBackupSave() {
@@ -1168,7 +1077,7 @@ export class InventoryDialog extends LitElement {
       { id: "dessert", label: "Dessert" },
     ];
 
-    const busy = this._importing || this._restoring || this._backingUp || this._serverBackingUp || this._serverRestoring;
+    const busy = this._importing || this._backingUp || this._serverBackingUp || this._serverRestoring;
 
     return html`
       <div class="dialog-overlay" @click=${this._close}>
@@ -1305,9 +1214,9 @@ export class InventoryDialog extends LitElement {
                 class="inv-btn"
                 @click=${this._serverBackupShowRestore}
                 ?disabled=${busy}
-                title="Restore from a server backup"
+                title="Restore from a local JSON file on the Home Assistant machine"
               >
-                ${this._serverRestoring ? "Restoring…" : "Server Restore"}
+                ${this._serverRestoring ? "Restoring…" : "Local Restore"}
               </button>
               <button
                 class="inv-btn"
@@ -1316,14 +1225,6 @@ export class InventoryDialog extends LitElement {
                 title="Download full cellar backup as JSON"
               >
                 ${this._backingUp ? "Saving…" : "Download"}
-              </button>
-              <button
-                class="inv-btn"
-                @click=${this._triggerRestore}
-                ?disabled=${busy}
-                title="Restore cellar from a JSON backup file"
-              >
-                ${this._restoring ? "Restoring…" : "Upload"}
               </button>
               <button
                 class="inv-btn"
@@ -1354,34 +1255,32 @@ export class InventoryDialog extends LitElement {
             style="display:none"
             @change=${this._handleImportCSV}
           />
-          <input
-            type="file"
-            id="inv-json-input"
-            accept=".json"
-            style="display:none"
-            @change=${this._handleRestoreFile}
-          />
 
           <!-- Server Restore Picker Overlay -->
           ${this._showServerRestore
             ? html`
                 <div class="inv-confirm-overlay" @click=${() => (this._showServerRestore = false)}>
                   <div class="inv-confirm-box" style="max-width:420px" @click=${(e: Event) => e.stopPropagation()}>
-                    <h3>Restore from Server</h3>
+                    <h3>Restore from Local File</h3>
                     ${this._serverBackups.length === 0
-                      ? html`<p>No server backups found. Use "Server Backup" to create one.</p>`
+                      ? html`<p>No JSON files found in <code>wine_cellar_backups</code>. Copy your backup there on the Home Assistant machine, then reopen this picker.</p>`
                       : html`
-                        <p>Select a backup to restore. This will <strong>replace</strong> all current data.</p>
+                        <p>Select a JSON file from Home Assistant's local <code>wine_cellar_backups</code> folder. This will <strong>replace</strong> all current data.</p>
                         <div style="max-height:250px;overflow-y:auto;margin:8px 0;">
                           ${this._serverBackups.map(
                             (b: any) => html`
                               <button
                                 class="inv-btn"
                                 style="width:100%;margin-bottom:4px;text-align:left;font-size:0.82em;padding:8px 12px;"
+                                ?disabled=${!!b.error}
                                 @click=${() => this._serverBackupRestore(b.filename)}
                               >
                                 <div>${b.timestamp ? new Date(b.timestamp).toLocaleString() : b.filename}</div>
-                                <div style="font-size:0.85em;color:var(--wc-text-secondary);">${b.wines} wines, ${b.cabinets} racks</div>
+                                <div style="font-size:0.85em;color:var(--wc-text-secondary);">
+                                  ${b.error
+                                    ? `Unreadable JSON file · ${b.filename}`
+                                    : `${b.wines} wines, ${b.cabinets} racks, ${b.buy_list ?? 0} buy list · ${b.filename}`}
+                                </div>
                               </button>
                             `
                           )}
@@ -1390,38 +1289,6 @@ export class InventoryDialog extends LitElement {
                     <div class="inv-confirm-btns">
                       <button class="inv-confirm-cancel" @click=${() => (this._showServerRestore = false)}>
                         Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              `
-            : nothing}
-
-          <!-- Restore Confirmation Overlay -->
-          ${this._confirmRestore && this._restoreData
-            ? html`
-                <div class="inv-confirm-overlay" @click=${() => (this._confirmRestore = false)}>
-                  <div class="inv-confirm-box" @click=${(e: Event) => e.stopPropagation()}>
-                    <h3>🔄 Restore Backup?</h3>
-                    <p>
-                      This will <strong>replace</strong> all your current cellar data with the backup.
-                      This action cannot be undone.
-                    </p>
-                    <div class="inv-confirm-stats">
-                      Backup contains:<br />
-                      <strong>${this._restoreData.wines?.length || 0}</strong> wines ·
-                      <strong>${this._restoreData.cabinets?.length || 0}</strong> racks ·
-                      <strong>${this._restoreData.buy_list?.length || 0}</strong> buy list items
-                      ${this._restoreData.timestamp
-                        ? html`<br /><small>Created: ${new Date(this._restoreData.timestamp).toLocaleString()}</small>`
-                        : nothing}
-                    </div>
-                    <div class="inv-confirm-btns">
-                      <button class="inv-confirm-cancel" @click=${() => (this._confirmRestore = false)}>
-                        Cancel
-                      </button>
-                      <button class="inv-confirm-go" @click=${this._executeRestore}>
-                        Restore Now
                       </button>
                     </div>
                   </div>
