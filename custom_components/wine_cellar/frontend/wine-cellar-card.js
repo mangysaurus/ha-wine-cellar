@@ -6902,6 +6902,29 @@ let InventoryDialog = class InventoryDialog extends i {
         this._historyItems = [];
         this._historyLoading = false;
     }
+    _formatError(err) {
+        if (typeof err === "string")
+            return err;
+        if (err?.message && err?.code)
+            return `${err.message} (${err.code})`;
+        if (err?.message)
+            return err.message;
+        if (err?.error && typeof err.error === "string")
+            return err.error;
+        if (err?.body && typeof err.body === "string")
+            return err.body;
+        try {
+            return JSON.stringify(err);
+        }
+        catch {
+            return String(err);
+        }
+    }
+    _logStatus(context, err) {
+        const message = this._formatError(err);
+        console.error(`Cork Dork: ${context}`, err);
+        return message;
+    }
     updated(changedProps) {
         if (changedProps.has("open") && this.open) {
             this._searchQuery = "";
@@ -7307,7 +7330,7 @@ let InventoryDialog = class InventoryDialog extends i {
             this._confirmRestore = true;
         }
         catch (err) {
-            this._statusMsg = `Invalid JSON file: ${err.message || err}`;
+            this._statusMsg = `Invalid JSON file: ${this._logStatus("invalid restore JSON", err)}`;
         }
     }
     async _executeRestore() {
@@ -7330,7 +7353,7 @@ let InventoryDialog = class InventoryDialog extends i {
             }
         }
         catch (err) {
-            this._statusMsg = `Restore failed: ${err.message || err}`;
+            this._statusMsg = `Restore failed: ${this._logStatus("restore failed", err)}`;
         }
         this._restoring = false;
         this._restoreData = null;
@@ -7353,7 +7376,7 @@ let InventoryDialog = class InventoryDialog extends i {
             }
         }
         catch (err) {
-            this._statusMsg = `Server backup failed: ${err.message || err}`;
+            this._statusMsg = `Server backup failed: ${this._logStatus("server backup save failed", err)}`;
             this._serverBackupLabel = "";
         }
         this._serverBackingUp = false;
@@ -7366,7 +7389,7 @@ let InventoryDialog = class InventoryDialog extends i {
             this._serverBackups = result?.backups || [];
         }
         catch (err) {
-            this._statusMsg = `Failed to list backups: ${err.message || err}`;
+            this._statusMsg = `Failed to list backups: ${this._logStatus("server backup list failed", err)}`;
             this._serverBackups = [];
         }
     }
@@ -7385,7 +7408,7 @@ let InventoryDialog = class InventoryDialog extends i {
             }
         }
         catch (err) {
-            this._statusMsg = `Restore failed: ${err.message || err}`;
+            this._statusMsg = `Restore failed: ${this._logStatus("server backup restore failed", err)}`;
         }
         this._serverRestoring = false;
     }
