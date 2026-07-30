@@ -117,12 +117,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Cork Dork from a config entry."""
     domain_data = hass.data.setdefault(DOMAIN, {})
 
-    # Register frontend static path (only once, persists across reloads)
-    if not domain_data.get("frontend_registered"):
+    # Re-register when the cache-busted frontend version changes.
+    if domain_data.get("frontend_registered_version") != FRONTEND_VERSION:
         _register_static_path(hass)
         # Auto-register as Lovelace resource so the card loads without manual config
         _register_frontend_resource(hass)
-        domain_data["frontend_registered"] = True
+        domain_data["frontend_registered_version"] = FRONTEND_VERSION
 
     # Register WebSocket commands (only once, they persist globally in HA)
     if not domain_data.get("websocket_registered"):
@@ -177,7 +177,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         domain_data = hass.data.get(DOMAIN, {})
-        # Remove entry-specific data but keep registration flags
+        # Remove entry-specific data but keep websocket/static-path registrations.
         domain_data.pop("storage", None)
         domain_data.pop("vivino", None)
         domain_data.pop("entry", None)
