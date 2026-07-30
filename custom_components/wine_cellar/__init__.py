@@ -15,7 +15,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN, FRONTEND_VERSION
 from .vivino import VivinoClient
-from .websocket import async_register_websocket_commands
+from .websocket import async_register_http_views, async_register_websocket_commands
 from .wine_storage import WineCellarStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,6 +123,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Auto-register as Lovelace resource so the card loads without manual config
         _register_frontend_resource(hass)
         domain_data["frontend_registered_version"] = FRONTEND_VERSION
+
+    if not domain_data.get("http_views_registered"):
+        async_register_http_views(hass)
+        domain_data["http_views_registered"] = True
 
     # Register WebSocket commands (only once, they persist globally in HA)
     if not domain_data.get("websocket_registered"):

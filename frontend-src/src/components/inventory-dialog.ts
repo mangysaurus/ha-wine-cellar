@@ -26,6 +26,7 @@ export class InventoryDialog extends LitElement {
   @state() private _restoring = false;
   @state() private _confirmRestore = false;
   @state() private _restoreData: any = null;
+  @state() private _restoreText = "";
   @state() private _statusMsg = "";
   @state() private _serverBackingUp = false;
   @state() private _serverBackupLabel = "";
@@ -946,6 +947,7 @@ export class InventoryDialog extends LitElement {
       }
 
       this._restoreData = data;
+      this._restoreText = text;
       this._confirmRestore = true;
     } catch (err: any) {
       this._statusMsg = `Invalid JSON file: ${this._logStatus("invalid restore JSON", err)}`;
@@ -960,10 +962,32 @@ export class InventoryDialog extends LitElement {
     this._statusMsg = "";
 
     try {
-      const result = await this.hass.callWS({
-        type: "wine_cellar/restore_backup",
-        backup: this._restoreData,
-      });
+      const response = await this.hass.fetchWithAuth(
+        "/api/wine_cellar/restore_backup",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: this._restoreText,
+        }
+      );
+
+      const responseText = await response.text();
+      let result: any = {};
+      if (responseText) {
+        try {
+          result = JSON.parse(responseText);
+        } catch {
+          result = { error: responseText };
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          `Restore failed (${response.status}): ${result?.error || responseText || response.statusText}`
+        );
+      }
 
       if (result.error) {
         this._statusMsg = `Restore failed: ${result.error}`;
@@ -977,6 +1001,7 @@ export class InventoryDialog extends LitElement {
 
     this._restoring = false;
     this._restoreData = null;
+    this._restoreText = "";
   }
 
   // ── Cloud Sync (Google Drive / file system) ──────────────────

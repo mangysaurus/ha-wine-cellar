@@ -6892,6 +6892,7 @@ let InventoryDialog = class InventoryDialog extends i {
         this._restoring = false;
         this._confirmRestore = false;
         this._restoreData = null;
+        this._restoreText = "";
         this._statusMsg = "";
         this._serverBackingUp = false;
         this._serverBackupLabel = "";
@@ -7327,6 +7328,7 @@ let InventoryDialog = class InventoryDialog extends i {
                 return;
             }
             this._restoreData = data;
+            this._restoreText = text;
             this._confirmRestore = true;
         }
         catch (err) {
@@ -7340,10 +7342,26 @@ let InventoryDialog = class InventoryDialog extends i {
         this._restoring = true;
         this._statusMsg = "";
         try {
-            const result = await this.hass.callWS({
-                type: "wine_cellar/restore_backup",
-                backup: this._restoreData,
+            const response = await this.hass.fetchWithAuth("/api/wine_cellar/restore_backup", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: this._restoreText,
             });
+            const responseText = await response.text();
+            let result = {};
+            if (responseText) {
+                try {
+                    result = JSON.parse(responseText);
+                }
+                catch {
+                    result = { error: responseText };
+                }
+            }
+            if (!response.ok) {
+                throw new Error(`Restore failed (${response.status}): ${result?.error || responseText || response.statusText}`);
+            }
             if (result.error) {
                 this._statusMsg = `Restore failed: ${result.error}`;
             }
@@ -7357,6 +7375,7 @@ let InventoryDialog = class InventoryDialog extends i {
         }
         this._restoring = false;
         this._restoreData = null;
+        this._restoreText = "";
     }
     // ── Cloud Sync (Google Drive / file system) ──────────────────
     async _serverBackupSave() {
@@ -8280,6 +8299,9 @@ __decorate([
 __decorate([
     r()
 ], InventoryDialog.prototype, "_restoreData", void 0);
+__decorate([
+    r()
+], InventoryDialog.prototype, "_restoreText", void 0);
 __decorate([
     r()
 ], InventoryDialog.prototype, "_statusMsg", void 0);
