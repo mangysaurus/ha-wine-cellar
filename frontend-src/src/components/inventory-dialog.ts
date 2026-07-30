@@ -928,10 +928,28 @@ export class InventoryDialog extends LitElement {
     this._statusMsg = "";
 
     try {
-      const result = await this.hass.callWS({
-        type: "wine_cellar/restore_backup",
-        backup: this._restoreData,
-      });
+      let result: any = null;
+      try {
+        const resp = await fetch("/api/wine_cellar/restore_backup", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "same-origin",
+          body: JSON.stringify(this._restoreData),
+        });
+
+        const payload = await resp.json().catch(() => null);
+        if (!resp.ok) {
+          throw new Error(payload?.error || payload?.message || `HTTP ${resp.status}`);
+        }
+        result = payload;
+      } catch (httpErr) {
+        result = await this.hass.callWS({
+          type: "wine_cellar/restore_backup",
+          backup: this._restoreData,
+        });
+      }
 
       if (result.error) {
         this._statusMsg = `Restore failed: ${result.error}`;

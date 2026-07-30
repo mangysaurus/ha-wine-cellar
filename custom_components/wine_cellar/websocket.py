@@ -7,14 +7,53 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from aiohttp import web
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.components.http.view import HomeAssistantView
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import Unauthorized
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_backup_payload(
+    backup: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract the expected backup arrays and validate required fields."""
+    wines = backup.get("wines", [])
+    cabinets = backup.get("cabinets", [])
+    buy_list = backup.get("buy_list", [])
+    wine_history = backup.get("wine_history", [])
+
+    if not isinstance(wines, list) or not isinstance(cabinets, list):
+        return None, None, [], []
+
+    return (
+        wines,
+        cabinets,
+        buy_list if isinstance(buy_list, list) else [],
+        wine_history if isinstance(wine_history, list) else [],
+    )
+
+
+async def _restore_backup_data(
+    hass: HomeAssistant,
+    backup: dict[str, Any],
+) -> dict[str, int] | str:
+    """Restore cellar data from a parsed backup payload."""
+    storage = hass.data[DOMAIN]["storage"]
+    wines, cabinets, buy_list, wine_history = _normalize_backup_payload(backup)
+    if wines is None or cabinets is None:
+        return "Invalid backup format: wines and cabinets must be arrays."
+
+    counts = storage.restore_data(wines, cabinets, buy_list, wine_history)
+    await storage.async_save()
+    hass.bus.async_fire(f"{DOMAIN}_updated")
+    return counts
 
 
 async def _auto_enrich_wine(hass: HomeAssistant, wine: dict[str, Any]) -> None:
@@ -117,6 +156,7 @@ async def _auto_enrich_buy_list_item(hass: HomeAssistant, item: dict[str, Any]) 
 
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Register WebSocket commands."""
+    hass.http.register_view(WineCellarBackupRestoreView())
     websocket_api.async_register_command(hass, ws_get_wines)
     websocket_api.async_register_command(hass, ws_get_cabinets)
     websocket_api.async_register_command(hass, ws_add_wine)
@@ -1167,30 +1207,19 @@ async def ws_restore_backup(
     msg: dict[str, Any],
 ) -> None:
     """Restore cellar data from a backup JSON."""
-    storage = hass.data[DOMAIN]["storage"]
-    backup = msg["backup"]
-
-    wines = backup.get("wines", [])
-    cabinets = backup.get("cabinets", [])
-    buy_list = backup.get("buy_list", [])
-    wine_history = backup.get("wine_history", [])
-
-    if not isinstance(wines, list) or not isinstance(cabinets, list):
+    result = await _restore_backup_data(hass, msg["backup"])
+    if isinstance(result, str):
         connection.send_result(
             msg["id"],
-            {"error": "Invalid backup format: wines and cabinets must be arrays."},
+            {"error": result},
         )
         return
 
-    counts = storage.restore_data(wines, cabinets, buy_list, wine_history)
-    await storage.async_save()
-    hass.bus.async_fire(f"{DOMAIN}_updated")
-
     _LOGGER.info(
         "Backup restored: %d wines, %d cabinets, %d buy list items",
-        counts["wines"], counts["cabinets"], counts["buy_list"],
+        result["wines"], result["cabinets"], result["buy_list"],
     )
-    connection.send_result(msg["id"], {"success": True, **counts})
+    connection.send_result(msg["id"], {"success": True, **result})
 
 
 @websocket_api.websocket_command(
@@ -1227,6 +1256,38 @@ def _get_server_backup_dir(hass: HomeAssistant) -> Path:
     d = Path(hass.config.config_dir) / "wine_cellar_backups"
     d.mkdir(exist_ok=True)
     return d
+
+
+class WineCellarBackupRestoreView(HomeAssistantView):
+    """HTTP endpoint for restoring a backup JSON upload."""
+
+    requires_auth = True
+    url = "/api/wine_cellar/restore_backup"
+    name = "api:wine_cellar:restore_backup"
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Restore cellar data from an uploaded backup JSON."""
+        user = request["hass_user"]
+        if not user.is_admin:
+            raise Unauthorized()
+
+        try:
+            backup = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON payload."}, status=400)
+
+        hass = request.app["hass"]
+        result = await _restore_backup_data(hass, backup)
+        if isinstance(result, str):
+            return web.json_response({"error": result}, status=400)
+
+        _LOGGER.info(
+            "HTTP backup restored: %d wines, %d cabinets, %d buy list items",
+            result["wines"],
+            result["cabinets"],
+            result["buy_list"],
+        )
+        return web.json_response({"success": True, **result})
 
 
 @websocket_api.websocket_command({vol.Required("type"): "wine_cellar/server_backup_save"})
