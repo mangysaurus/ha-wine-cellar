@@ -7,13 +7,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from aiohttp import web
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.components.http.view import HomeAssistantView
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import Unauthorized
 
 from .const import DOMAIN
 
@@ -156,7 +153,6 @@ async def _auto_enrich_buy_list_item(hass: HomeAssistant, item: dict[str, Any]) 
 
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Register WebSocket commands."""
-    hass.http.register_view(WineCellarBackupRestoreView())
     websocket_api.async_register_command(hass, ws_get_wines)
     websocket_api.async_register_command(hass, ws_get_cabinets)
     websocket_api.async_register_command(hass, ws_add_wine)
@@ -1256,39 +1252,6 @@ def _get_server_backup_dir(hass: HomeAssistant) -> Path:
     d = Path(hass.config.config_dir) / "wine_cellar_backups"
     d.mkdir(exist_ok=True)
     return d
-
-
-class WineCellarBackupRestoreView(HomeAssistantView):
-    """HTTP endpoint for restoring a backup JSON upload."""
-
-    requires_auth = True
-    url = "/api/wine_cellar/restore_backup"
-    name = "api:wine_cellar:restore_backup"
-
-    async def post(self, request: web.Request) -> web.Response:
-        """Restore cellar data from an uploaded backup JSON."""
-        user = request["hass_user"]
-        if not user.is_admin:
-            raise Unauthorized()
-
-        try:
-            backup = await request.json()
-        except Exception:
-            return web.json_response({"error": "Invalid JSON payload."}, status=400)
-
-        hass = request.app["hass"]
-        result = await _restore_backup_data(hass, backup)
-        if isinstance(result, str):
-            return web.json_response({"error": result}, status=400)
-
-        _LOGGER.info(
-            "HTTP backup restored: %d wines, %d cabinets, %d buy list items",
-            result["wines"],
-            result["cabinets"],
-            result["buy_list"],
-        )
-        return web.json_response({"success": True, **result})
-
 
 @websocket_api.websocket_command({vol.Required("type"): "wine_cellar/server_backup_save"})
 @websocket_api.async_response
